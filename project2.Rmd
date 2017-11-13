@@ -1,0 +1,160 @@
+---
+title: "Greatest wheather events impacts on U.S. health and economy"
+output: html_document
+---
+# Synopsis
+
+The purpose of the analysis is to evaluate the damage caused by weather events on the health and economy of the United States. Data set provides from NOAA Storm Database. Only five 4 variables are focused (Fatalities, Injuries, Crops damages and Props damages) for our problematics. Data is provided from 1950's, but with incomplete data before 1996: so we decide to work with averaged data for last ten years (2002-2011). One of major job is normalize events with the official list of 48 events from NOAA (it's necessary to use automatic process for reproducibility. Finaly, analysis focus on the 15 most important events for each category because cover is larger than 90%.
+
+# Section 1: Data Processing
+Set global options and load libraries
+```{r setup, echo = TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(R.utils)
+library(data.table)
+library(dplyr)
+library(stringdist)
+library(ggplot2)
+library(cowplot)
+library(knitr)
+library(kableExtra)
+```
+
+### Load the data set
+use cache, and select only relevant colums
+```{r load, cache=TRUE}
+if(!file.exists("repdata_data_StormData.csv")) {
+  t1<-Sys.time()
+  bunzip2("repdata_data_StormData.csv.bz2", remove=FALSE)
+}
+fread("repdata_data_StormData.csv", showProgress = FALSE) %>%
+  select(EVTYPE,BGN_DATE,FATALITIES,INJURIES, CROPDMG, CROPDMGEXP, PROPDMG,PROPDMGEXP) -> data
+
+dim(data)
+```
+
+### Reduce the data set
+Focus only on the last ten years, drop rows without relevant data
+```{r reduce-data, cache=TRUE}
+filter(data, FATALITIES !=0| INJURIES!=0 | CROPDMG !=0| PROPDMG !=0) %>%
+  mutate(EVTYPE= tolower(EVTYPE)) -> data
+
+year<-year(strptime(as.character(data$BGN_DATE), "%m/%d/%Y"))
+cbind(year,data) %>%
+  select(-BGN_DATE) %>%
+  filter(year>2001) -> data #data from 2002 to 2011 (10 years)
+
+dim(data)
+```
+
+### Make EVTYPE Tidy
+Convert all and merge EVTYPE events to the official list of 48 events from NOAA
+```{r tidy-EVTYPE, cache=TRUE}
+list_evt <- c("Astronomical Low Tide","Avalanche","Blizzard","Coastal Flood","Cold/Wind Chill","Debris Flow","Fog","Dense Smoke","Drought","Dust Devil","Dust Storm","Excessive Heat","Extr Cold/Wind Chill","Flash Flood","Flood","Frost/Freeze","Cloud","Freezing Fog","Hail","Heat","Rain","Snow","Surf","hight Wind","Hurricane","Ice Storm","Lake-Effect Snow","Lakeshore Flood","Lightning","Marine Hail","Marine High Wind","Marine Strong Wind","Marine Thunderstorm Wind", "Rip Current","Seiche","Sleet","Storm Surge/Tide","Strong Wind","Thunderstorm Wind","Tornado","Tropical Depression","Tropical Storm","Tsunami","Volcanic Ash","Waterspout","Wildfire","Winter Storm","Winter Weather")
+
+# before
+length(levels(factor(data$EVTYPE)))
+
+# manual corrections of non recomized values
+data<- mutate(data, EVTYPE = gsub("heavy surf/high surf", "high surf", EVTYPE))
+data<- mutate(data, EVTYPE = gsub("urban/sml stream fld", "flood", EVTYPE))
+data<- mutate(data, EVTYPE = gsub("mixed precipitation", "rain", EVTYPE))
+# use amatch to automatize process
+data<- mutate(data, EVTYPE = factor(list_evt[amatch(EVTYPE, list_evt, maxDist = 10)]))
+# after: must be <= 48 
+length(levels(factor(data$EVTYPE)))
+# NA must be zero
+sum(is.na(data$EVTYPE)==TRUE)
+data[(is.na(data$EVTYPE)==TRUE),]
+```
+
+### Make CROPDMG and PROPDMG Tidy
+Convert K,M and B to integers and calculate amounts
+```{r tidy-DMG}
+dic <- data.frame(c("","K", "M", "B"), c(1,10^3, 10^6, 10^9))
+names(dic) <- c("key","value")
+
+mutate(data,CROPDMG = CROPDMG * dic[amatch(CROPDMGEXP, dic$key),2]) %>%
+  mutate(PROPDMG = PROPDMG * dic[amatch(PROPDMGEXP, dic$key),2]) %>%
+  select(-CROPDMGEXP, -PROPDMGEXP) -> data
+
+str(data)
+```
+
+# Section 2: Results
+### Group and summarise data by EVTYPE
+```{r result-group}
+delta_years <- max(data$year) - min(data$year) +1
+
+group_by(data,EVTYPE) %>%
+  summarise(Fatalities=sum(FATALITIES)/delta_years, Injuries=sum(INJURIES)/delta_years,
+            Crop_Damages = sum(CROPDMG)/delta_years, Prop_Damages = sum(PROPDMG)/delta_years) %>%
+  arrange(desc(Fatalities)) -> S_data
+
+```
+
+### Report of the most harmful Events with respect to population health
+Fatalities is the first class elements to focus ; Injuries is the second
+```{r result-health, fig.height=8}
+s <- arrange(S_data, desc(Fatalities))
+s <- head(s,15)
+s1 <- arrange(S_data, desc(Injuries))
+s1 <- head(s1,15)
+s$EVTYPE <- factor(s$EVTYPE, levels = s$EVTYPE[order(s$Fatalities)])
+s1$EVTYPE <- factor(s1$EVTYPE, levels = s1$EVTYPE[order(s1$Injuries)])
+
+#calculate ratios to estimate coverage with 15 events
+sprintf("Ratio top 15 events Fatalities / total Fatalities: %1.3f", sum(s$Fatalities)/sum(S_data$Fatalities))
+sprintf("Ratio top 15 events Injuries / total Injuries: %1.3f", sum(s1$Injuries)/sum(S_data$Injuries))
+
+g<- ggplot(s, aes(EVTYPE,Fatalities))
+p<-g + geom_bar(stat = "identity") + coord_flip() + background_grid(minor='none') + xlab("Events") + ylab("Fatalities per year")
+
+g1<- ggplot(s1, aes(EVTYPE,Injuries))
+p1<-g1 + geom_bar(stat = "identity") + coord_flip() + background_grid(minor='none') + xlab("Events") + ylab("Injuries per year")
+
+p2<- plot_grid(p, p1,ncol = 1, nrow = 2, labels = c('A-Fatalities', 'B-Injuries'), label_size = 10)
+title <- ggdraw() + draw_label("Most harmful Events with respect to population health\n Fifteen greatest harmfull Events - 10 years averaged (2001-2011)", fontface='bold')
+plot_grid(title, p2, ncol=1, rel_heights=c(0.1, 1)) # rel_heights values control title margins
+```
+
+### Report Events with the greatest economic consequences
+Analyse Crops and Props damage
+```{r result-economic, fig.height=8}
+s <- arrange(S_data, desc(Prop_Damages))
+s <- head(s,15)
+s1 <- arrange(S_data, desc(Crop_Damages))
+s1 <- head(s1,15)
+s$EVTYPE <- factor(s$EVTYPE, levels = s$EVTYPE[order(s$Prop_Damages)])
+s1$EVTYPE <- factor(s1$EVTYPE, levels = s1$EVTYPE[order(s1$Crop_Damages)])
+
+#calculate ratios to estimate coverage with 15 events
+sprintf("Ratio top 15 events Prop Damages / total Prop Damage: %1.3f", sum(s$Prop_Damages)/sum(S_data$Prop_Damages))
+sprintf("Ratio top 15 events Crop Damages / total Crop Damage: %1.3f", sum(s1$Crop_Damages)/sum(S_data$Crop_Damages))
+
+g<- ggplot(s, aes(EVTYPE,Prop_Damages/10^6)) # 10^6 is million USD
+p<-g + geom_bar(stat = "identity") + coord_flip() + background_grid(minor='none') + xlab("Events") + ylab("Prop Damages (Million USD) per year")
+
+g1<- ggplot(s1, aes(EVTYPE,Crop_Damages/10^6))
+p1<-g1 + geom_bar(stat = "identity") + coord_flip() + background_grid(minor='none') + xlab("Events") + ylab("Crop Damages (Million USD) per year")
+
+
+p2<- plot_grid(p, p1,ncol = 1, nrow = 2, labels = c('A-Prop', 'B-Crop'), label_size = 10)
+title <- ggdraw() + draw_label("Events with the greatest economic consequences\n Fifteen greatest events - 10 years averaged (2001-2011)", fontface='bold')
+
+plot_grid(title, p2, ncol=1, rel_heights=c(0.1, 1))
+```
+
+### Conclusions
+* TORNADO (#1),EXCESSIVE HEAT(#2)and FLOOD (#3) causes most casualities (Death/Injuries) in US  
+* FLODD (#1), HURRICANE (#2) and LIGHTNING (#3) causes most Props Damages in US  
+* DROUGHT (#1), FLODD (#2) and HURRICANE (#3) causes most Props Damages in US  
+
+
+
+### Report data Summary
+Report all summarized data (per year, averaged on ten years), sort by Fatalities (most important element). Crops and Props damages are in USD.
+```{r result-summary}
+arrange(S_data, desc(Fatalities))%>% 
+  kable("html") %>% kable_styling()
+```
